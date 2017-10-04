@@ -135,6 +135,10 @@
         }
     };
 
+    Object.defineProperty(window.BlitRenderingContext.prototype, 'canvas', {
+        get: function () { return this.gl.canvas; },
+    });
+
     const fnGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function(type, attribs) {
         if (type !== 'blit')
