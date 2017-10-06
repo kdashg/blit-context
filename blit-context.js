@@ -1,13 +1,20 @@
 (function() {
     'use strict';
 
-    function rectToDevicePixels(x, gl) {
-        x[0] *= gl.drawingBufferWidth / gl.canvas.width;
-        x[1] *= gl.drawingBufferHeight / gl.canvas.height;
-        x[2] *= gl.drawingBufferWidth / gl.canvas.width;
-        x[3] *= gl.drawingBufferHeight / gl.canvas.height;
+    function scaleRect(rect, scaleX, scaleY) {
+        rect[0] *= scaleX;
+        rect[1] *= scaleY;
+        rect[2] *= scaleX;
+        rect[3] *= scaleY;
+    }
 
-        x[1] = gl.drawingBufferHeight - (x[1] + x[3]); // flip y
+    function flipY(rect, height) {
+        rect[1] = height - (rect[1] + rect[3]);
+    }
+
+    function normalizeCanvasRect(rect, gl) {
+        scaleRect(rect, 1.0 / gl.canvas.width, 1.0 / gl.canvas.height);
+        flipY(rect, 1.0);
     }
 
     function linkProgramSources(gl, vertSource, fragSource) {
@@ -52,11 +59,14 @@
 
     const kBlitVS = [
         'attribute vec2 aVert;',
+        'uniform vec4 uDestRect;',
+        'uniform vec4 uTexRect;',
         'varying vec2 vTexCoord;',
         '',
         'void main() {',
-        '    vTexCoord = aVert;',
-        '    gl_Position = vec4(aVert * 2.0 - 1.0, 0.0, 1.0);',
+        '    vec2 destPos = uDestRect.xy + aVert*uDestRect.zw;',
+        '    gl_Position = vec4(destPos * 2.0 - 1.0, 0.0, 1.0);',
+        '    vTexCoord = uTexRect.xy + aVert*uTexRect.zw;',
         '}',
     ].join('\n');
     const kBlitFS = [
@@ -94,50 +104,99 @@
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-        gl.blitProg = linkProgramSources(gl, kBlitVS, kBlitFS);
-        gl.useProgram(gl.blitProg);
-        gl.uniform1i(gl.blitProg.uTex, 0);
+        this.blitProg = linkProgramSources(gl, kBlitVS, kBlitFS);
+        gl.useProgram(this.blitProg);
+        gl.uniform1i(this.blitProg.uTex, 0);
 
-        gl.defaultTex = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, gl.defaultTex);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        this.defaultTex = this.createTexture();
     };
 
-    window.BlitRenderingContext.prototype.blit = function(src, destOffset, destSize) {
-        destOffset = destOffset || [0,0];
-        destSize = destSize || [src.width, src.height];
-
+    window.BlitRenderingContext.prototype.blit = function(src, srcRect, destOffset,
+                                                          destSize)
+    {
         const gl = this.gl;
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
 
-        const rect = [destOffset[0], destOffset[1], destSize[0], destSize[1]];
-        rectToDevicePixels(rect, gl);
+        let tex;
+        if (src instanceof window.BlitTexture) {
+            tex = src;
+        } else {
+            tex = this.defaultTex;
+            tex.snapshot(src);
+        }
 
-        gl.viewport(rect[0], rect[1], rect[2], rect[3]);
+        gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+
+        srcRect = srcRect || [0, 0, tex.width, tex.height];
+        destOffset = destOffset || [0, 0];
+        destSize = destSize || [srcRect[2], srcRect[3]];
+        const destRect = [destOffset[0], destOffset[1], destSize[0], destSize[1]];
+
+        scaleRect(srcRect, 1.0 / tex.width, 1.0 / tex.height);
+        flipY(srcRect, 1.0);
+
+        normalizeCanvasRect(destRect, gl);
+
+        if (gl.drawingBufferWidth != this.lastWidth ||
+            gl.drawingBufferHeight != this.lastHeight)
+        {
+            this.lastWidth = gl.drawingBufferWidth;
+            this.lastHeight = gl.drawingBufferHeight;
+            gl.viewport(0, 0, this.lastWidth, this.lastHeight);
+        }
+        gl.uniform4f(this.blitProg.uDestRect, destRect[0], destRect[1], destRect[2], destRect[3]);
+        gl.uniform4f(this.blitProg.uTexRect, srcRect[0], srcRect[1], srcRect[2], srcRect[3]);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     };
 
-    window.BlitRenderingContext.prototype.clear = function(r,g,b,a, rect) {
+    window.BlitRenderingContext.prototype.clear = function(r,g,b,a, destRect) {
         a = a || 1.0;
         const gl = this.gl;
         gl.clearColor(r,g,b,a);
-        if (rect) {
+        if (destRect) {
             gl.enable(gl.SCISSOR_TEST);
-            const deviceRect = [rect[0], rect[1], rect[2], rect[3]];
-            rectToDevicePixels(deviceRect, gl);
-            gl.scissor(deviceRect[0], deviceRect[1], deviceRect[2], deviceRect[3]);
+            normalizeCanvasRect(destRect, gl);
+            scaleRect(destRect, gl.drawingBufferWidth, gl.drawingBufferHeight);
+            gl.scissor(destRect[0], destRect[1], destRect[2], destRect[3]);
         }
         gl.clear(gl.COLOR_BUFFER_BIT);
-        if (rect) {
+        if (destRect) {
             gl.disable(gl.SCISSOR_TEST);
         }
+    };
+
+    window.BlitRenderingContext.prototype.createTexture = function() {
+        const gl = this.gl;
+        const tex = new window.BlitTexture(this);
+        return tex;
     };
 
     Object.defineProperty(window.BlitRenderingContext.prototype, 'canvas', {
         get: function () { return this.gl.canvas; },
     });
+
+    window.BlitTexture = function(brc) {
+        this.brc = brc;
+        const gl = this.brc.gl;
+        this.tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        this.width = 0;
+        this.height = 0;
+    };
+    window.BlitTexture.prototype.delete = function() {
+        const gl = this.brc.gl;
+        gl.deleteTexture(this.tex);
+    };
+    window.BlitTexture.prototype.snapshot = function(src) {
+        const gl = this.brc.gl;
+        gl.bindTexture(gl.TEXTURE_2D, this.tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+        this.width = src.width;
+        this.height = src.height;
+    };
 
     const fnGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function(type, attribs) {

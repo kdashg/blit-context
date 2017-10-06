@@ -24,7 +24,7 @@ destCanvas.width = 160;
 destCanvas.height = 100;
 const blit = destCanvas.getContext('blit');
 blit.clear(1, 0, 1);
-blit.blit(gl.canvas, [3,3]);
+blit.blit(gl.canvas, null, [70,3]);
 
 blit.clear(0, 1, 1, 1, [blit.canvas.width - 20, 0, 20, 20]);
 
